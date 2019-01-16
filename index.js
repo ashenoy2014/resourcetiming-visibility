@@ -4,7 +4,11 @@
 //
 const Crawler = require("./crawler");
 const fs = require("fs");
-const sitesFile = "sites-1000.csv";
+//const sitesFile = "sites-1000.csv";
+//const sitesFile = "avi-sites.csv";
+//const sitesFile = "Nic_hostnames.csv";
+const sitesFile = "test1.csv";
+
 
 // command-line arguments
 if (process.argv.length <= 2) {

@@ -16,6 +16,7 @@ const fs = require("fs");
 // create output streams
 var outSites = fs.createWriteStream("output-sites.json");
 var outUrls = fs.createWriteStream("output-urls.json");
+var outBoomrVersion = fs.createWriteStream("output-boomr-version.csv");
 
 //
 // Functions
@@ -36,7 +37,7 @@ Crawler.prototype.crawl = async function() {
     console.log(chalk.green("Starting Crawler"));
 
     // launch the browser
-    let browser = await puppeteer.launch();
+    let browser = await puppeteer.launch({headless: false});
 
     // create a new page
     let page = await browser.newPage();
@@ -52,90 +53,40 @@ Crawler.prototype.crawl = async function() {
 
     // Listens for Page Responses
     page.on("response", async response => {
-        if (!crawlingActive) {
-            // don't track new responses if we're beyond monitoring
-            return;
-        }
-
-        // skip the page itself
-        if (response.url() === currentUrl ||
-            response.url() === currentUrl + "/") {
-
-            // update to the new location so we skip that too
-            if (response.status() === 301 || response.status() === 302) {
-                currentUrl = response.headers().location;
-                console.log(`  -> redirect to ${currentUrl}`);
-            }
-
-            return;
-        }
-
-        if (response.status() === 301 || response.status() === 302) {
-            // skip redirects
-            return;
-        }
-
-        if (response.url().indexOf("http") !== 0) {
-            // skip data: and other URLs
-            return;
-        }
-
-        let resp = {
-            url: response.url()
-        };
-
-        // track important headers
-        const headers = response.headers();
-
-        //
-        // Content-Length
-        //
-        resp.contentLength = 0;
-        if (headers["content-length"] && Number(headers["content-length"]) > 0) {
-            resp.contentLength = Number(headers["content-length"]);
-        } else {
-            try {
-                const buf = await response.buffer();
-                resp.contentLength = buf.byteLength;
-            } catch (e) {
-                // NOP
-            }
-        }
-
-        // Content-Type and Content-Encoding
-        resp.contentType = headers["content-type"];
-        resp.contentEncoding = headers["content-encoding"];
-
-        // headers size
-        var headerContents = "";
-        for (var header in headers) {
-            headerContents += header + ": " + headers[header] + "\n";
-        }
-
-        // header and transfer size
-        resp.headerSize = headerContents.length;
-        resp.transferSize = resp.contentLength + resp.headerSize;
-
-        // find the asset type
-        resp.assetType = getAssetTypeFor(resp.url, resp.contentType, resp.contentLength);
-        if (!resp.assetType) {
-            debug(`No asset type for ${resp.url}`);
-        }
-
-        // extract the host
-        const urlParsed = new URL(resp.url);
-        resp.host = urlParsed.host;
-
-        console.log(
-            "  ",
-            chalk.underline(limit(resp.url, 80, " ")),
-            resp.contentLength,
-            resp.headerSize,
-            resp.transferSize,
-            resp.assetType);
-
-        responses.push(resp);
+        
     });
+
+
+    let url = undefined;
+
+    page.on("load", async function() {
+        console.log("Page load complete for url: " + url);
+        // Evaluate for BOOMR
+        let boomrJSHandle;
+        boomrJSHandle = await page.evaluateHandle(() => {
+            return Promise.resolve(window.BOOMR ? JSON.stringify(window.BOOMR.version) : undefined);
+            // return window;
+        });
+
+        if (boomrJSHandle) {
+            // console.log("BOOMR: " + JSON.stringify(boomrVar));
+            //let boomrVar = await boomrJSHandle.jsonValue();
+            //console.log("BOOMR: " + boomrVar);
+            let boomrVersion = await boomrJSHandle.jsonValue();
+            console.log("BOOMR: " + boomrVersion);
+
+            if (boomrVersion) {
+                outBoomrVersion.write(url + ", " + boomrVersion);
+            } else {
+                outBoomrVersion.write(url + ", No Boomerang");
+            }  
+            outBoomrVersion.write("\n");
+        } else {
+            // BOOMR not defined
+            console.log("Page does not have Boomerang instrumented");
+            outBoomrVersion.write(url + ",NoBoomR");
+        }
+    }.bind(this));
 
     // debug logging messages from the page
     page.on("console", function(msg) {
@@ -143,11 +94,12 @@ Crawler.prototype.crawl = async function() {
     });
 
     // make sure when the new document starts, we set the ResourceTiming buffer size listener
-    page.evaluateOnNewDocument(resourceTimingBufferSizeFn);
+    //page.evaluateOnNewDocument(resourceTimingBufferSizeFn);
 
     // run through each page
-    for (let url of this.sites) {
+    for (url of this.sites) {
         crawlingActive = false;
+        console.log("From file, Got URL: " + url);
 
         if (url.indexOf("http://") !== 0 &&
             url.indexOf("https://") !== 0) {
@@ -169,12 +121,35 @@ Crawler.prototype.crawl = async function() {
 
             await page.goto(url, {
                 waitUntil: ["networkidle2", "load"],
-                timeout: 30000
+                timeout: 60000
             });
         } catch (e) {
             console.log("Crawl timeout");
             continue;
         }
+
+        /*
+        // Evaluate for BOOMR
+        let boomrJSHandle;
+        boomrJSHandle = await page.evaluateHandle(() => {
+            return Promise.resolve(window.BOOMR ? JSON.stringify(window.BOOMR.version) : undefined);
+            // return window;
+        });
+
+        if (boomrJSHandle) {
+            // console.log("BOOMR: " + JSON.stringify(boomrVar));
+            //let boomrVar = await boomrJSHandle.jsonValue();
+            //console.log("BOOMR: " + boomrVar);
+            let boomrVersion = await boomrJSHandle.jsonValue();
+            console.log("BOOMR: " + boomrVersion);
+            outBoomrVersion.write(url + "," + boomrVersion);
+        } else {
+            // BOOMR not defined
+            console.log("Page does not have Boomerang instrumented");
+            outBoomrVersion.write(url + ",NoBoomR");
+        }
+        outBoomrVersion.write("\n");
+        */
 
         //
         // Collect all ResourceTiming data
@@ -198,10 +173,12 @@ Crawler.prototype.crawl = async function() {
 
         // go to about:blank so unload beacons get sent out for the previous page
         // before the next one
+        /*
         await page.goto("about:blank", {
             waitUntil: ["networkidle2", "load"],
             timeout: 5000
         });
+        */
 
         await sleep(2000);
     }
